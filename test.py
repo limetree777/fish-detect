@@ -7,7 +7,7 @@ import base64
 app = Flask(__name__)
 
 # 1. 모델 로드
-model = YOLO('yolo11n.pt') 
+model = YOLO('best.pt') 
 
 @app.route('/')
 def index():
