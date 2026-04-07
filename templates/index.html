@@ -1,116 +1,199 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>실시간 물고기 AI 탐지기 </title>
-    <style>
-        body { font-family: sans-serif; margin: 0; background: #000; color: #fff; overflow: hidden; }
-        .container { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; align-items: center; }
-        
-        /* 서버에서 받은 이미지 (상자 그려진 상태) 표시 */
-        #processed-image { width: 100%; height: 100%; object-fit: contain; }
-        
-        /* ⭐ ms 시간 표시 스타일 ⭐ */
-        #performance-overlay { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px; font-weight: bold; font-size: 0.9rem; color: #ffeb3b; border: 1px solid #ffeb3b; }
-        
-        /* 하단 결과 창 */
-        #overlay-bottom { position: absolute; bottom: 30px; left: 15px; right: 15px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 12px; border: 1px solid #444; }
-        .result-item { font-size: 1.2rem; color: #00e676; margin: 5px 0; }
-        .status { font-size: 0.8rem; color: #aaa; margin-bottom: 5px; }
-        
-        /* 전송용 카메라는 숨김 */
-        #video-hidden { display: none; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>생선선생 (AI 어종 분석)</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; margin: 0; padding: 10px; background-color: #f0f0f5; }
+    #videoContainer { position: relative; margin: 0 auto; max-width: 100%; }
+    video, canvas { border: 2px solid #333; border-radius: 8px; max-width: 100%; touch-action: none; }
+    
+    button { padding: 12px 24px; font-size: 16px; margin: 5px; cursor: pointer; border-radius: 8px; border: none; font-weight: bold; background-color: #007bff; color: white;}
+    button:disabled { background-color: #cccccc; cursor: not-allowed; }
+    
+    #instruction { font-size: 18px; color: #333; margin-bottom: 10px; font-weight: bold; }
+    #resultBox { display: none; margin-top: 20px; padding: 15px; background: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <img id="processed-image" src="" alt="카메라 연결 대기 중...">
-        
-        <div id="performance-overlay">서버: 대기 중</div>
-        
-        <video id="video-hidden" autoplay playsinline></video>
-        <canvas id="canvas-hidden" width="640" height="640" style="display:none;"></canvas>
+  <h2>생선선생 (AI 어종 분석)</h2>
+  <div id="instruction">카메라로 물고기를 비추고 촬영하세요.</div>
+  
+  <div id="videoContainer">
+    <video id="webcam" autoplay playsinline style="display: inline-block;"></video>
+    <canvas id="imageCanvas" style="display:none;"></canvas>
+  </div>
 
-        <div id="overlay-bottom">
-            <div class="status" id="status">상태: 카메라 연결 대기 중...</div>
-            <div id="results">물체를 화면에 비춰주세요.</div>
-        </div>
-    </div>
+  <div>
+    <button id="captureBtn">📸 촬영 및 AI 분석 시작</button>
+    <button id="retakeBtn" style="display:none;">🔄 다시 찍기</button>
+  </div>
 
-    <script>
-        const video = document.getElementById('video-hidden');
-        const canvas = document.getElementById('canvas-hidden');
-        const processedImage = document.getElementById('processed-image');
-        const perfOverlay = document.getElementById('performance-overlay');
-        const resultsDiv = document.getElementById('results');
-        const statusDiv = document.getElementById('status');
+  <div id="resultBox">
+    <div id="speciesText" style="font-size: 18px; margin-bottom: 10px;"></div>
+    <div id="lengthText" style="font-size: 22px; font-weight: bold; color: #d9534f;"></div>
+  </div>
 
-        // 1. 카메라 시작
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-            .then(stream => { video.srcObject = stream; })
-            .catch(err => { statusDiv.innerText = "카메라 에러: " + err; });
+  <script>
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('imageCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    const instruction = document.getElementById('instruction');
+    const captureBtn = document.getElementById('captureBtn');
+    const retakeBtn = document.getElementById('retakeBtn');
+    
+    const resultBox = document.getElementById('resultBox');
+    const speciesText = document.getElementById('speciesText');
+    const lengthText = document.getElementById('lengthText');
 
-        // 2. 실시간 루프 (0.5초마다 실행)
-        async function detectLoop() {
-            // 카메라 화면을 캔버스에 그리기
-            const context = canvas.getContext('2d');
-            context.drawImage(video, 0, 0, 640, 640);
-            
-            // 이미지 압축 및 전송
-            canvas.toBlob(async (blob) => {
-                const formData = new FormData();
-                formData.append('image', blob, 'frame.jpg');
+    let stream = null;
+    let points = [];
+    let isAnalyzing = false; // 측정 단계인지 확인하는 플래그
+    const CARD_LENGTH_CM = 8.56;
 
-                // ⭐ 시간 측정 시작 ⭐
-                const startTime = performance.now();
-                
-                try {
-                    const response = await fetch('/predict', { method: 'POST', body: formData });
-                    const data = await response.json();
-                    
-                    // ⭐ 시간 측정 종료 및 ms 계산 ⭐
-                    const endTime = performance.now();
-                    const processingTime = Math.round(endTime - startTime);
+    // 카메라 켜기
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        video.srcObject = stream;
+      } catch (err) {
+        instruction.innerHTML = "카메라 권한을 허용해주세요.";
+      }
+    }
+    startCamera();
 
-                    if (data.image_data) {
-                        // 서버에서 그려준 이미지를 화면에 표시
-                        processedImage.src = data.image_data;
-                        statusDiv.innerText = `상태: 실시간 분석 중`;
-                        
-                        // ⭐ ms 시간 업데이트 ⭐
-                        perfOverlay.innerText = `서버: ${processingTime}ms`;
-                        
-                        // 지연 시간에 따라 표시 색상 변경 (예시)
-                        if (processingTime > 800) perfOverlay.style.color = '#ff5252'; // 빨간색
-                        else if (processingTime > 400) perfOverlay.style.color = '#ffeb3b'; // 노란색
-                        else perfOverlay.style.color = '#00e676'; // 초록색
-                    }
+    // 1. 촬영 버튼 클릭 -> 캡처 후 즉시 서버 전송
+    captureBtn.addEventListener('click', () => {
+      // 숨겨진 임시 캔버스로 캡처
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = video.videoWidth;
+      tempCanvas.height = video.videoHeight;
+      tempCanvas.getContext('2d').drawImage(video, 0, 0);
+      
+      video.style.display = 'none';
+      captureBtn.style.display = 'none';
+      instruction.innerHTML = "⏳ AI가 물고기를 분석 중입니다...";
 
-                    if (data.predictions && data.predictions.length > 0) {
-                        // ⭐ 결과 표시 ⭐
-                        resultsDiv.innerHTML = data.predictions.map(p => `
-                            <div class="result-item">
-                                <b>${p.species}</b> (확률: ${Math.round(p.confidence * 100)}%)
-                            </div>
-                        `).join('');
-                    } else {
-                        resultsDiv.innerHTML = "감지된 대상 없음";
-                    }
-                } catch (e) {
-                    console.error("서버 에러:", e);
-                    statusDiv.innerText = "서버 연결 오류";
-                    perfOverlay.innerText = "서버: 오류";
-                    perfOverlay.style.color = '#ff5252';
-                }
-                
-                // 루프 속도 조절 (0.5초 뒤 다시 실행)
-                setTimeout(detectLoop, 500);
-            }, 'image/jpeg', 0.6); // 이미지 화질 60%로 압축하여 전송 속도 향상
+      // Blob으로 변환하여 서버로 전송
+      tempCanvas.toBlob(async (blob) => {
+        const formData = new FormData();
+        formData.append("image", blob, "capture.jpg"); 
+
+        try {
+          // 플라스크의 /detect 엔드포인트 호출
+          const response = await fetch('/detect', { method: 'POST', body: formData });
+          const result = await response.json();
+          
+          if(result.status === 'success') {
+            displayAIResult(result);
+          } else {
+            alert("분석 실패: " + result.error);
+            resetUI();
+          }
+        } catch (error) {
+          alert("서버 통신 오류가 발생했습니다.");
+          resetUI();
         }
+      }, 'image/jpeg');
+    });
 
-        // 비디오 재생이 시작되면 루프 시작
-        video.onplay = () => { detectLoop(); };
-    </script>
+    // 2. 서버에서 받은 AI 결과 띄우기
+    function displayAIResult(result) {
+      // 캔버스에 YOLO 분석이 끝난 이미지 그리기
+      const resultImg = new Image();
+      resultImg.onload = () => {
+        canvas.width = resultImg.width;
+        canvas.height = resultImg.height;
+        ctx.drawImage(resultImg, 0, 0);
+        
+        canvas.style.display = 'inline-block';
+        retakeBtn.style.display = 'inline-block';
+        
+        // 종 목록 표시
+        let speciesHtml = '🐟 <b>감지된 객체:</b><ul style="text-align: left; margin: 5px 0;">';
+        if (result.detected_objects.length > 0) {
+          result.detected_objects.forEach(obj => {
+            speciesHtml += `<li>${obj.species} (${obj.confidence}%)</li>`;
+          });
+        } else {
+          speciesHtml += '<li>감지된 객체가 없습니다.</li>';
+        }
+        speciesHtml += '</ul>';
+        speciesText.innerHTML = speciesHtml;
+        resultBox.style.display = 'block';
+
+        // 수동 측정 모드 활성화
+        points = [];
+        isAnalyzing = true;
+        instruction.innerHTML = "<b>[1단계]</b> 기준 카드의 긴 면 양 끝점 2개를 터치하세요.";
+      };
+      resultImg.src = result.result_image;
+    }
+
+    // 3. 자바스크립트 수동 터치 및 즉각 계산
+    canvas.addEventListener('click', (e) => {
+      if (!isAnalyzing || points.length >= 4) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top) * scaleY;
+      
+      points.push({ x: x, y: y });
+
+      // 점 그리기
+      ctx.fillStyle = points.length <= 2 ? 'red' : 'blue';
+      ctx.beginPath();
+      ctx.arc(x, y, canvas.width * 0.01, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (points.length === 2) {
+        // 첫 두 점(카드) 선 긋기
+        drawLine(points[0], points[1], 'red');
+        instruction.innerHTML = "<b>[2단계]</b> 물고기의 머리와 꼬리를 터치하세요.";
+      } else if (points.length === 4) {
+        // 나중 두 점(물고기) 선 긋기
+        drawLine(points[2], points[3], 'blue');
+        
+        // 자바스크립트로 길이 계산 (유클리드 거리)
+        const cardPixelDist = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
+        const fishPixelDist = Math.hypot(points[3].x - points[2].x, points[3].y - points[2].y);
+        
+        const cmPerPixel = CARD_LENGTH_CM / cardPixelDist;
+        const fishActualLength = fishPixelDist * cmPerPixel;
+
+        lengthText.innerHTML = `📏 측정 길이: 약 ${fishActualLength.toFixed(1)} cm`;
+        instruction.innerHTML = "<b>측정 완료!</b>";
+      }
+    });
+
+    // 캔버스에 선 그리는 함수
+    function drawLine(p1, p2, color) {
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 4;
+      ctx.stroke();
+    }
+
+    // 다시 찍기 버튼
+    retakeBtn.addEventListener('click', resetUI);
+
+    function resetUI() {
+      canvas.style.display = 'none';
+      video.style.display = 'inline-block';
+      captureBtn.style.display = 'inline-block';
+      retakeBtn.style.display = 'none';
+      resultBox.style.display = 'none';
+      lengthText.innerHTML = "";
+      isAnalyzing = false;
+      instruction.innerHTML = "카메라로 물고기를 비추고 촬영하세요.";
+    }
+  </script>
 </body>
 </html>

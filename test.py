@@ -1,70 +1,79 @@
-from flask import Flask, render_template, request, jsonify
-from ultralytics import YOLO
 import cv2
 import numpy as np
 import base64
+from flask import Flask, request, jsonify, render_template
+from ultralytics import YOLO
 
 app = Flask(__name__)
 
-# 1. 모델 로드
+# 객체 감지(Detection)용 YOLO 모델 로드
 model = YOLO('best.pt') 
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    try:
-        file = request.files['image'].read()
-        npimg = np.frombuffer(file, np.uint8)
-        img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+@app.route('/detect', methods=['POST'])
+def detect():
+    # 1. 이미지 받기
+    file = request.files.get('image')
+    if not file:
+        return jsonify({"error": "이미지가 없습니다."}), 400
 
-        if img is None:
-            return jsonify({"error": "이미지 디코딩 실패"}), 400
+    in_memory_file = file.read()
+    nparr = np.frombuffer(in_memory_file, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        results = model.predict(img, conf=0.25, verbose=False)
+    # 2. YOLO 객체 감지 수행
+    results = model(img)
+    result = results[0]
+    
+    # 박스와 라벨이 그려진 이미지 생성
+    annotated_img = result.plot()
+
+    detected_objects = []
+
+    # 3. 감지된 객체 정보 추출
+    for box in result.boxes:
+        cls_id = int(box.cls[0])
+        conf = float(box.conf[0]) * 100
+        species = result.names[cls_id]
         
-        annotated_img = img.copy()
-        predictions = []
+        # 한국어 이름으로 변환
+        species = change_fish_name_to_korean(species)
 
-        for r in results:
-            for box in r.boxes:
-                # 상자 좌표
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                conf = float(box.conf[0])
-                cls = int(box.cls[0])
-                label = r.names[cls]
-                
-                # 상자 및 텍스트 그리기
-                # 파란색 상자 (255, 0, 0), 두께 2
-                cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                
-                # 텍스트 내용: [어종 확신도%] (예: fish 85%)
-                label_str = f"{label} {round(conf * 100)}%"
-                
-                # 텍스트 그리기 (상자 좌상단 위)
-                cv2.putText(annotated_img, label_str, (x1, y1 - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-
-                predictions.append({
-                    "species": label,
-                    "confidence": round(conf, 2)
-                })
-
-        # 4. 결과 이미지를 base64로 변환
-        _, buffer = cv2.imencode('.jpg', annotated_img, [cv2.IMWRITE_JPEG_QUALITY, 60])
-        img_as_text = base64.b64encode(buffer).decode('utf-8')
-        
-        return jsonify({
-            "image_data": f"data:image/jpeg;base64,{img_as_text}",
-            "predictions": predictions
+        detected_objects.append({
+            "species": species,
+            "confidence": round(conf, 1)
         })
 
-    except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
+    # 4. 분석이 끝난 이미지를 Base64로 인코딩
+    _, buffer = cv2.imencode('.jpg', annotated_img)
+    img_base64 = base64.b64encode(buffer).decode('utf-8')
+
+    # 결과 반환 (길이 계산은 프론트엔드로 위임)
+    return jsonify({
+        "status": "success",
+        "detected_objects": detected_objects,
+        "result_image": f"data:image/jpeg;base64,{img_base64}"
+    })
+
+
+def change_fish_name_to_korean(species):
+    fish_name = {
+        "Olive flounder": "넙치(광어)",
+        "Korea rockfish": "조피볼락(우럭)",
+        "Red seabream": "참돔",
+        "Black porgy": "감성돔",
+        "Rock bream": "돌돔",
+        "Scomber japonicus	": "고등어",
+        "Snakehead": "가물치",
+        "Pseudocaranx dentex": "흑점줄전갱이",
+        "Mugil cephalus": "숭어",
+        "Freshwater Eel": "민물장어, 뱀장어",
+        "Belone belone": "학꽁치",
+    }
+    return fish_name.get(species, species)  # 매핑이 없으면 원래 이름 반환
 
 if __name__ == '__main__':
-    # 외부 접속 할때는 0.0.0.0으로 실행
     app.run(port=11111)
